@@ -2,33 +2,42 @@ import os
 from dotenv import load_dotenv
 from groq import Groq
 
-# Importa i tuoi moduli di agente esistenti o futuri
+# Importa i tuoi moduli di agente esistenti
 from agents.notion_agent import save_to_notion
 from agents.meteo_agent import get_meteo
 from agents.system_agent import get_system_status
 
+# Importa i nuovi agenti
+from agents.agent_rss_digest import fetch_rss_summaries
+from agents.agent_cmd import run_system_command
+
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# Definizione del modello unico scelto per il router
+ROUTER_MODEL = "openai/gpt-oss-120b"
+
 def route_and_execute(user_text: str) -> str:
     """
-    Analizza l'input dell'utente, determina l'intento tramite LLM 
+    Analizza l'input dell'utente, determina l'intento tramite LLM (gpt-oss-120b)
     e smista la richiesta all'agente di competenza.
     """
     system_prompt = (
-        "Sei il router centrale di Jarvis. Il tuo compito è analizzare la richiesta "
-        "dell'utente e classificarla esattamente in una di queste categorie:\n"
-        "1. NOTION (es. appunti, ricordati di, annota, salva nota)\n"
-        "2. METEO (es. tempo, previsioni, piove, temperatura)\n"
-        "3. SYSTEM (es. stato, cpu, ram, batteria, risorse)\n"
-        "4. GENERAL (qualsiasi altra conversazione o domanda generale)\n\n"
-        "Rispondi unicamente con una delle quattro parole chiave: NOTION, METEO, SYSTEM, GENERAL."
+        "Sei il router centrale di Jarvis. Analizza la richiesta dell'utente "
+        "e rispondi ESCLUSIVAMENTE con una delle seguenti parole chiave:\n\n"
+        "- NOTION: se chiede di salvare note, appunti, idee o promemoria.\n"
+        "- METEO: se chiede previsioni del tempo, temperatura o se piove.\n"
+        "- SYSTEM: se chiede lo stato dell'hardware, CPU, RAM, temperature o risorse del Pi.\n"
+        "- RSS: se chiede news, notizie tech, aggiornamenti RSS o briefing giornaliero.\n"
+        "- CMD: se chiede di eseguire un comando terminale, riavviare servizi o lanciare script Bash.\n"
+        "- GENERAL: per qualsiasi altra conversazione, domanda generale o richiesta di codice.\n\n"
+        "Rispondi SOLO con la parola chiave scelta."
     )
     
     try:
-        # Chiamata rapida ed economica per il routing dell'intento
+        # Classificazione dell'intento con openai/gpt-oss-120b
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # Modello fulmineo perfetto per il Pi Zero
+            model=ROUTER_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text}
@@ -40,11 +49,10 @@ def route_and_execute(user_text: str) -> str:
         intent = completion.choices[0].message.content.strip().upper()
         print(f"[Router] Intento rilevato: {intent}")
         
-        # Smistamento basato sull'intento
+        # Smistamento degli intenti
         if "NOTION" in intent:
-            # Estrae il contenuto rimuovendo il comando se necessario o passando tutto
             result = save_to_notion(user_text)
-            return f"📝 Nota salvata su Notion con successo!"
+            return "📝 Nota salvata su Notion con successo!"
             
         elif "METEO" in intent:
             return get_meteo()
@@ -52,19 +60,3 @@ def route_and_execute(user_text: str) -> str:
         elif "SYSTEM" in intent:
             return get_system_status()
             
-        else:
-            # Fallback su un modello conversazionale generale (es. gpt-oss-120b o llama-3.3)
-            return ask_general_llm(user_text)
-            
-    except Exception as e:
-        print(f"[Router Error] {e}")
-        return "⚠️ Si è verificato un errore nel routing della richiesta."
-
-def ask_general_llm(text: str) -> str:
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": text}],
-        temperature=0.7,
-        max_tokens=300
-    )
-    return response.choices[0].message.content
