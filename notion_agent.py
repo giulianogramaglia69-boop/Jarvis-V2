@@ -1,72 +1,50 @@
 import os
-import logging
 import requests
-from typing import Optional, Dict, Any
+from dotenv import load_dotenv
 
-logger = logging.getLogger(__name__)
+load_dotenv()
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-class NotionAgent:
-    def __init__(self):
-        self.api_key = os.getenv("NOTION_API_KEY")
-        self.database_id = os.getenv("NOTION_DATABASE_ID")
-        self.version = "2022-06-28"
-        
-        if not self.api_key or not self.database_id:
-            logger.warning("NotionAgent: NOTION_API_KEY o NOTION_DATABASE_ID non configurati correttamente nelle variabili d'ambiente.")
+def save_to_notion(text: str) -> str:
+    """Salva una nota o un'idea all'interno del database Notion configurato."""
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+        return "⚠️ Credenziali Notion mancanti nel file .env."
 
-    def _get_headers(self) -> Dict[str, str]:
-        """Restituisce gli header di autenticazione richiesti dalle API di Notion."""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Notion-Version": self.version
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+
+    # Pulisce il testo rimuovendo eventuali prefissi di comando comuni
+    clean_text = text.replace("nota", "").replace("annotami", "").replace("ricordati di", "").strip()
+    if not clean_text:
+        clean_text = text
+
+    payload = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Name": {
+                "title": [
+                    {
+                        "text": {
+                            "content": clean_text
+                        }
+                    }
+                ]
+            }
         }
+    }
 
-    def create_database_page(self, title: str, content: str, category: Optional[str] = "Generale") -> bool:
-        """
-        Crea una nuova pagina all'interno del database Notion specificato.
-        Suddivide automaticamente il contenuto in blocchi da massimo 2000 caratteri.
-        """
-        if not self.api_key or not self.database_id:
-            logger.error("Impossibile procedere con Notion: credenziali mancanti.")
-            return False
-
-        url = "https://api.notion.com/v1/pages"
-        
-        # Suddivide il testo in blocchi conformi al limite di 2000 caratteri dei paragrafi Notion
-        chunks = [content[i:i+2000] for i in range(0, len(content), 2000)]
-        children_blocks = [
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                }
-            } for chunk in chunks
-        ]
-
-        payload = {
-            "parent": {"database_id": self.database_id},
-            "properties": {
-                "Name": {
-                    "title": [{"text": {"content": title}}]
-                },
-                "Categoria": {
-                    "select": {"name": category}
-                }
-            },
-            "children": children_blocks
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=15)
-            if response.status_code == 200:
-                logger.info(f"Pagina Notion '{title}' creata con successo.")
-                return True
-            else:
-                logger.error(f"Errore Notion API ({response.status_code}): {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.exception(f"Eccezione durante la chiamata alle API di Notion: {e}")
-            return False
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            return f"📝 Nota salvata con successo su Notion: \"{clean_text}\""
+        else:
+            print(f"[Notion Error] {response.text}")
+            return "⚠️ Errore durante la comunicazione con l'API di Notion."
+    except Exception as e:
+        print(f"[Notion Exception] {e}")
+        return "⚠️ Impossibile raggiungere Notion al momento."
