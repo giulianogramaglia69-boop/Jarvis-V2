@@ -32,13 +32,12 @@ notion = NotionAgent()
 weather = WeatherAgent()
 system_monitor = SystemMonitorAgent()
 
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if secretary.is_authorized(user.id):
-        await update.message.reply_text("👋 Bentornato, Admin. I sistemi di Jarvis con IA Segretario (openai/gpt-oss-120b) sono operativi.")
+        await update.message.reply_text("👋 Bentornato, Admin. I sistemi di Jarvis (Meteo, Notion, System Monitor e IA) sono operativi.")
     else:
         await update.message.reply_text("Benvenuto. Questo è il terminale privato di Jarvis.")
 
@@ -51,11 +50,10 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # --- 1. GESTIONE UTENTE AUTORIZZATO (ADMIN) ---
-            # --- 1. GESTIONE UTENTE AUTORIZZATO (ADMIN) ---
     if secretary.is_authorized(user_id):
-        logger.info(f"Comando/Messaggio ricevuto dall'Admin ({user_id}): {text}")
+        logger.info(f"Messaggio dall'Admin ({user_id}): {text}")
         
-        # Comando /status per monitorare il Pi Zero
+        # Comando /status o /sys per il System Monitor del Pi Zero
         if text.lower().startswith("/status") or text.lower().startswith("/sys"):
             status_report = system_monitor.get_system_report()
             await update.message.reply_text(status_report, parse_mode="Markdown")
@@ -66,7 +64,6 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
             weather_report = weather.get_agrigento_weather()
             await update.message.reply_text(weather_report, parse_mode="Markdown")
             return
-
 
         # Comando /nota <testo> per Notion
         if text.startswith("/nota "):
@@ -80,19 +77,18 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
                 await update.message.reply_text("❌ Errore durante la scrittura su Notion.")
             return
 
-        await update.message.reply_text(f"Jarvis Admin Core - Ricevuto: {text}\n(Usa /meteo per il bollettino)")
+        # Qualsiasi altro messaggio dell'admin diventa una chat libera con l'IA (es. "Chi era Albert Einstein?")
+        ai_response = await secretary.chat_with_admin_ai(text)
+        await update.message.reply_text(ai_response, parse_mode="Markdown")
         return
 
     # --- 2. GESTIONE UTENTE NON AUTORIZZATO (CON IA SEGRETARIO) ---
     logger.info(f"Messaggio da utente esterno ID: {user_id} (@{user.username or 'N/A'}) -> Analisi con openai/gpt-oss-120b...")
     
-    # Chiama il modulo secretary che sfrutta il modello openai/gpt-oss-120b su Groq
     bot_reply, should_forward, reason = await secretary.evaluate_message_with_ai(text, user.to_dict())
-    
-    # Invia la risposta calcolata dall'IA all'utente esterno
     await update.message.reply_text(bot_reply, parse_mode="Markdown")
 
-    # Se l'IA ha stabilito che la richiesta è diretta a te o richiede attenzione, la inoltra
+    # Se l'IA stabilisce che il messaggio è diretto a te o richiede attenzione, lo inoltra
     if should_forward and secretary.admin_ids:
         primary_admin = secretary.admin_ids[0]
         alert_msg = (
@@ -104,7 +100,7 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         )
         try:
             await context.bot.send_message(chat_id=primary_admin, text=alert_msg, parse_mode="Markdown")
-            logger.info(f"Segnalazione importante inoltrata con successo all'admin {primary_admin}")
+            logger.info(f"Segnalazione inoltrata con successo all'admin {primary_admin}")
         except Exception as e:
             logger.error(f"Errore durante l'inoltro dell'alert all'admin: {e}")
 
