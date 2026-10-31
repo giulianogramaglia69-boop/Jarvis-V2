@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Tuple, Dict, Any
 from groq import Groq
+from gtts import gTTS
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +29,45 @@ class SecretaryModule:
         """Verifica se l'utente è l'amministratore autorizzato."""
         return user_id in self.admin_ids
 
+    def transcribe_audio(self, audio_file_path: str) -> str:
+        """Trascrive un file audio in testo usando Groq Whisper (whisper-large-v3)."""
+        if not self.client:
+            logger.error("Client Groq non disponibile per la trascrizione audio.")
+            return ""
+        
+        try:
+            with open(audio_file_path, "rb") as file:
+                transcription = self.client.audio.transcriptions.create(
+                    file=(audio_file_path, file.read()),
+                    model="whisper-large-v3",
+                    response_format="text",
+                    language="it"
+                )
+            return transcription.strip()
+        except Exception as e:
+            logger.error(f"Errore durante la trascrizione audio con Whisper: {e}")
+            return ""
+
+    def text_to_speech(self, text: str, output_filename: str = "response.mp3") -> str:
+        """Converte una stringa di testo in un file audio MP3 tramite gTTS."""
+        try:
+            # Rimuove simboli di formattazione markdown per una lettura vocale pulita
+            clean_text = text.replace("*", "").replace("`", "").replace("#", "").replace(">", "")
+            tts = gTTS(text=clean_text, lang="it", slow=False)
+            tts.save(output_filename)
+            return output_filename
+        except Exception as e:
+            logger.error(f"Errore durante la generazione TTS: {e}")
+            return ""
+
     async def evaluate_message_with_ai(self, user_message: str, user_data: Dict[str, Any]) -> Tuple[str, bool, str]:
-        """
-        Analizza il messaggio di un utente non autorizzato tramite il modello openai/gpt-oss-120b su Groq.
-        Restituisce una tupla: (risposta_per_utente, deve_inoltrare_all_admin, motivazione_inoltro)
-        """
+        """Analizza il messaggio di un utente non autorizzato tramite openai/gpt-oss-120b."""
         username = user_data.get("username", "sconosciuto")
         first_name = user_data.get("first_name", "Utente")
 
-        # Fallback nel caso in cui le API di Groq non siano configurate
         if not self.client:
             return self._fallback_evaluation(user_message)
 
-        # System Prompt per istruire il modello sul comportamento con gli esterni
         system_prompt = (
             "Sei Jarvis, un assistente IA avanzato che fa da segretario per il tuo creatore/amministratore (Giuliano).\n"
             "Il tuo compito è analizzare i messaggi degli utenti esterni e decidere come comportarti.\n\n"
@@ -52,9 +79,9 @@ class SecretaryModule:
             "è stata presa in carico e sarà valutata dal proprietario. In questo caso 'should_forward' deve essere TRUE.\n\n"
             "DEVI RISPONDERE ESCLUSIVAMENTE IN FORMATO JSON VALIDABILE CON LA SEGUENTE STRUTTURA:\n"
             "{\n"
-            '  "reply": "La risposta testuale formattata in Markdown da inviare all\'utente",\n'
+            '  "reply": "La risposta testuale formattata da inviare all\'utente",\n'
             '  "should_forward": true/false,\n'
-            '  "reason": "Una breve motivazione in italiano del perché hai deciso di inoltrare o meno il messaggio"\n'
+            '  "reason": "Una breve motivazione in italiano"\n'
             "}"
         )
 
@@ -73,26 +100,19 @@ class SecretaryModule:
             )
 
             result_json = json.loads(response.choices[0].message.content)
-            
-            reply = result_json.get("reply", "Richiesta ricevuta.")
-            should_forward = result_json.get("should_forward", False)
-            reason = result_json.get("reason", "Analisi completata.")
-
-            return reply, should_forward, reason
-
+            return result_json.get("reply", "Richiesta ricevuta."), result_json.get("should_forward", False), result_json.get("reason", "Analisi completata.")
         except Exception as e:
-            logger.error(f"Errore durante la chiamata alle API di Groq con openai/gpt-oss-120b: {e}")
+            logger.error(f"Errore Groq API: {e}")
             return self._fallback_evaluation(user_message)
 
     async def chat_with_admin_ai(self, user_message: str) -> str:
-        """Gestisce la chat libera tra l'Admin e l'IA usando openai/gpt-oss-120b."""
+        """Gestisce la chat libera tra l'Admin e l'IA."""
         if not self.client:
-            return "🤖 [Modalità Offline] Le API di Groq non sono configurate per la chat libera."
+            return "🤖 [Modalità Offline] Le API di Groq non sono configurate."
 
         system_prompt = (
-            "Sei Jarvis, un assistente IA personale, avanzato e fedele, creato da Giuliano (l'utente con cui stai parlando).\n"
-            "Rispondi alle sue domande in modo intelligente, preciso, utile e diretto. "
-            "Trattalo sempre con il rispetto dovuto al tuo creatore/amministratore."
+            "Sei Jarvis, un assistente IA personale, avanzato e fedele, creato da Giuliano.\n"
+            "Rispondi alle sue domande in modo intelligente, preciso, utile e diretto."
         )
 
         try:
@@ -108,20 +128,11 @@ class SecretaryModule:
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Errore chat admin con IA: {e}")
-            return "❌ Si è verificato un errore durante la generazione della risposta dell'IA."
+            return "❌ Errore nella generazione della risposta."
 
     def _fallback_evaluation(self, user_message: str) -> Tuple[str, bool, str]:
-        """Logica deterministica di emergenza se le API IA non rispondono."""
         text_lower = user_message.lower()
         keywords = ["urgente", "emergenza", "importante", "contatto", "chiama", "scrivi", "appuntamento", "giuliano"]
-        
         is_important = any(kw in text_lower for kw in keywords)
-        
-        reply = (
-            "🤖 **Segretario Virtuale Jarvis**\n\n"
-            "Ho preso in carico il tuo messaggio. "
-            "Se la comunicazione contiene una richiesta diretta per l'amministratore, gli verrà inoltrata."
-        )
-        reason = "Rilevamento parole chiave (Modalità Fallback)" if is_important else "Messaggio generico (Modalità Fallback)"
-        
-        return reply, is_important, reason
+        reply = "🤖 **Segretario Virtuale Jarvis**\n\nHo preso in carico il tuo messaggio e lo inoltrerò se necessario."
+        return reply, is_important, "Modalità Fallback"
