@@ -1,130 +1,126 @@
 import os
-import sys
 import logging
-import time
+import asyncio
+from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from secretary import SecretaryModule
-from notion_agent import NotionAgent
-from weather_agent import WeatherAgent
-from system_monitor_agent import SystemMonitorAgent
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from groq import Groq
 
-# Configurazione Logging
+# Importa l'agente router che abbiamo creato
+from router import route_and_execute
+from gtts import gTTS
+
+# Carica le variabili d'ambiente
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))  # Il tuo ID Telegram autorizzato
+
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# Configurazione logging di base
 logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("jarvis_bot.log", encoding="utf-8")
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logger = logging.getLogger("JarvisCore")
+logger = logging.getLogger(__name__)
 
-# Inizializzazione dei moduli
-secretary = SecretaryModule()
-notion = NotionAgent()
-weather = WeatherAgent()
-system_monitor = SystemMonitorAgent()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+def check_auth(user_id: int) -> bool:
+    """Controlla se l'utente è autorizzato (il creatore del bot)."""
+    return user_id == ADMIN_ID
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gestisce i messaggi di testo in arrivo."""
     user = update.effective_user
-    if secretary.is_authorized(user.id):
-        await update.message.reply_text("👋 Bentornato, Admin. I sistemi di Jarvis (Meteo, Notion, System Monitor e IA) sono operativi.")
-    else:
-        await update.message.reply_text("Benvenuto. Questo è il terminale privato di Jarvis.")
-
-async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    text = update.message.text
-
-    if not text:
+    if not check_auth(user.id):
+        await update.message.reply_text("⛔ Non sei autorizzato a usare questo bot.")
         return
 
-    # --- 1. GESTIONE UTENTE AUTORIZZATO (ADMIN) ---
-    if secretary.is_authorized(user_id):
-        logger.info(f"Messaggio dall'Admin ({user_id}): {text}")
+    user_text = update.message.text
+    logger.info(f"[Testo] Da {user.username}: {user_text}")
+
+    # Notifica di elaborazione
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    # Invia la richiesta al Router Agent
+    response_text = route_and_execute(user_text)
+
+    await update.message.reply_text(response_text)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gestisce i messaggi vocali: scarica, trascrive con Whisper, smista e risponde in audio."""
+    user = update.effective_user
+    if not check_auth(user.id):
+        await update.message.reply_text("⛔ Non sei autorizzato a usare questo bot.")
+        return
+
+    logger.info(f"[Vocale] Ricevuto messaggio vocale da {user.username}")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="record_voice")
+
+    voice_file = None
+    ogg_path = "temp_voice.ogg"
+    mp3_path = "response.mp3"
+
+    try:
+        # 1. Scarica il file audio da Telegram
+        file = await context.bot.get_file(update.message.voice.file_id)
+        await file.download_to_drive(ogg_path)
+
+        # 2. Trascrizione con Whisper (Groq API)
+        with open(ogg_path, "rb") as file_audio:
+            transcription = client.audio.transcriptions.create(
+                file=(ogg_path, file_audio.read()),
+                model="whisper-large-v3",
+                language="it",
+                response_format="text"
+            )
         
-        # Comando /status o /sys per il System Monitor del Pi Zero
-        if text.lower().startswith("/status") or text.lower().startswith("/sys"):
-            status_report = system_monitor.get_system_report()
-            await update.message.reply_text(status_report, parse_mode="Markdown")
-            return
+        user_text = transcription.strip()
+        logger.info(f"[Whisper Trascrizione]: {user_text}")
 
-        # Comando /meteo per Agrigento
-        if text.lower().startswith("/meteo"):
-            weather_report = weather.get_agrigento_weather()
-            await update.message.reply_text(weather_report, parse_mode="Markdown")
-            return
+        # Invia una notifica con il testo capito
+        await update.message.reply_text(f"🗣️ *Trascrizione:* {user_text}", parse_mode="Markdown")
 
-        # Comando /nota <testo> per Notion
-        if text.startswith("/nota "):
-            content = text[6:].strip()
-            title = content.split("\n")[0][:50] if content else "Nota Rapida Telegram"
-            success = notion.create_database_page(title=title, content=content, category="Note Rapide")
-            
-            if success:
-                await update.message.reply_text("✅ Nota archiviata con successo nel database Notion.")
-            else:
-                await update.message.reply_text("❌ Errore durante la scrittura su Notion.")
-            return
+        # 3. Invia il testo trascritto al Router Agent
+        response_text = route_and_execute(user_text)
 
-        # Qualsiasi altro messaggio dell'admin diventa una chat libera con l'IA (es. "Chi era Albert Einstein?")
-        ai_response = await secretary.chat_with_admin_ai(text)
-        await update.message.reply_text(ai_response, parse_mode="Markdown")
+        # 4. Genera la risposta audio (TTS con gTTS)
+        tts = gTTS(text=response_text, lang="it", slow=False)
+        tts.save(mp3_path)
+
+        # 5. Invia il messaggio di testo e la risposta vocale su Telegram
+        await update.message.reply_text(response_text)
+        with open(mp3_path, "rb") as voice_resp:
+            await update.message.reply_voice(voice=voice_resp)
+
+    except Exception as e:
+        logger.error(f"[Voice Error]: {e}")
+        await update.message.reply_text("⚠️ Si è verificato un errore durante l'elaborazione del vocale.")
+
+    finally:
+        # Pulisce i file temporanei locali
+        if os.path.exists(ogg_path):
+            os.remove(ogg_path)
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+
+
+def main():
+    """Avvia il bot in modalità polling."""
+    if not TELEGRAM_TOKEN:
+        logger.error("ERRORE: TELEGRAM_TOKEN non trovato nel file .env!")
         return
 
-    # --- 2. GESTIONE UTENTE NON AUTORIZZATO (CON IA SEGRETARIO) ---
-    logger.info(f"Messaggio da utente esterno ID: {user_id} (@{user.username or 'N/A'}) -> Analisi con openai/gpt-oss-120b...")
-    
-    bot_reply, should_forward, reason = await secretary.evaluate_message_with_ai(text, user.to_dict())
-    await update.message.reply_text(bot_reply, parse_mode="Markdown")
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Se l'IA stabilisce che il messaggio è diretto a te o richiede attenzione, lo inoltra
-    if should_forward and secretary.admin_ids:
-        primary_admin = secretary.admin_ids[0]
-        alert_msg = (
-            f"🚨 **SEGNALAZIONE DA INOLTRARE (IA)**\n\n"
-            f"👤 **Mittente:** {user.full_name} (`@{user.username or 'Senza username'}`)\n"
-            f"🆔 **ID:** `{user_id}`\n"
-            f"🧠 **Motivazione IA:** *{reason}*\n\n"
-            f"💬 **Messaggio:**\n> {text}"
-        )
-        try:
-            await context.bot.send_message(chat_id=primary_admin, text=alert_msg, parse_mode="Markdown")
-            logger.info(f"Segnalazione inoltrata con successo all'admin {primary_admin}")
-        except Exception as e:
-            logger.error(f"Errore durante l'inoltro dell'alert all'admin: {e}")
+    # Registrazione degli handler
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    logger.info("🤖 Jarvis Bot avviato con successo e in ascolto...")
+    application.run_polling()
+
 
 if __name__ == "__main__":
-    if not TELEGRAM_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN mancante!")
-        sys.exit(1)
-
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_incoming_message))
-
-    while True:
-        try:
-            logger.info("Avvio polling Telegram...")
-            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        except Exception as e:
-            logger.error(f"Errore critico polling: {e}. Riavvio tra 10 secondi...")
-            time.sleep(10)
+    main()
