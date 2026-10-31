@@ -13,6 +13,7 @@ from telegram.ext import (
 from secretary import SecretaryModule
 from notion_agent import NotionAgent
 from weather_agent import WeatherAgent
+from system_monitor_agent import SystemMonitorAgent
 
 # Configurazione Logging
 logging.basicConfig(
@@ -29,6 +30,8 @@ logger = logging.getLogger("JarvisCore")
 secretary = SecretaryModule()
 notion = NotionAgent()
 weather = WeatherAgent()
+system_monitor = SystemMonitorAgent()
+
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -48,14 +51,22 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # --- 1. GESTIONE UTENTE AUTORIZZATO (ADMIN) ---
+            # --- 1. GESTIONE UTENTE AUTORIZZATO (ADMIN) ---
     if secretary.is_authorized(user_id):
         logger.info(f"Comando/Messaggio ricevuto dall'Admin ({user_id}): {text}")
         
+        # Comando /status per monitorare il Pi Zero
+        if text.lower().startswith("/status") or text.lower().startswith("/sys"):
+            status_report = system_monitor.get_system_report()
+            await update.message.reply_text(status_report, parse_mode="Markdown")
+            return
+
         # Comando /meteo per Agrigento
         if text.lower().startswith("/meteo"):
             weather_report = weather.get_agrigento_weather()
             await update.message.reply_text(weather_report, parse_mode="Markdown")
             return
+
 
         # Comando /nota <testo> per Notion
         if text.startswith("/nota "):
